@@ -173,7 +173,7 @@ func (a *Account) parseOnlineLectures(kj string, week_no string) (params []*view
 		if !exist {
 			return
 		}
-		r, _ := regexp.Compile(`'[0-9a-zA-Z]+'`)
+		r, _ := regexp.Compile(`'[0-9a-zA-Z]*'`)
 		tmp_params := r.FindAllString(f, 5)
 		week := tmp_params[0][1 : len(tmp_params[0])-1]
 		seq := tmp_params[1][1 : len(tmp_params[1])-1]

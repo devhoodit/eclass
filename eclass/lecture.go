@@ -31,10 +31,11 @@ func (a *Account) AsyncAutoRunLecture() error {
 			return nil
 		}
 		for _, week_no := range week_nos {
-			viewParams, err = a.parseOnlineLectures(subject.Kj, week_no)
+			viewP, err := a.parseOnlineLectures(subject.Kj, week_no)
 			if err != nil {
 				return err
 			}
+			viewParams = append(viewParams, viewP...)
 		}
 	}
 

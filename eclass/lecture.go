@@ -85,7 +85,7 @@ func (a *Account) AsyncAutoRunLecture() error {
 		index += 1
 	}
 
-	for i := 0; i < len(onlineViewParams); i++ {
+	for i := 0; i < index; i++ {
 		out := <-ch
 		if out.Err != nil {
 			fmt.Printf("#%d: viewWorker => %s | Error: %s\n", out.Index, red("ERROR"), out.Err.Error())

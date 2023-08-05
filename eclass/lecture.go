@@ -7,9 +7,12 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
+	"strings"
 
 	"github.com/PuerkitoBio/goquery"
 	onlineview "github.com/devhoodit/eclass/eclass/onlineView"
+	"github.com/fatih/color"
 )
 
 func (a *Account) AutoRunLecture() error {
@@ -26,12 +29,12 @@ func (a *Account) AsyncAutoRunLecture() error {
 	viewParams := []*viewParams{}
 
 	for _, subject := range subjects {
-		week_nos, err := a.parseLectureWeeks(subject.Kj)
+		lectureForms, err := a.parseLectureWeeks(subject.Kj)
 		if err != nil {
 			return nil
 		}
-		for _, week_no := range week_nos {
-			viewP, err := a.parseOnlineLectures(subject.Kj, week_no)
+		for _, lectureForm := range lectureForms {
+			viewP, err := a.parseOnlineLectures(subject.Kj, lectureForm)
 			if err != nil {
 				return err
 			}
@@ -64,23 +67,31 @@ func (a *Account) AsyncAutoRunLecture() error {
 			Interval_time: 240,
 			ReturnData:    "json",
 			Encoding:      "utf-8",
+			RemainSec:     p.RemainSec,
 		})
 	}
 
-	ch := make(chan int)
+	green := color.New(color.BgGreen).SprintFunc()
+	red := color.New(color.BgRed).SprintFunc()
 
-	for index, ovp := range onlineViewParams {
-		fmt.Printf("#%d: autoCheckWorkerOn\n", index)
-		go ovp.Run(2, ch)
+	ch := make(chan onlineview.ViewWorker)
+	index := 0
+	for _, ovp := range onlineViewParams {
+		if ovp.RemainSec <= 0 {
+			continue
+		}
+		fmt.Printf("#%d: viewWorker => %s\n", index, green("SUCCESS"))
+		go ovp.Run(index, ch)
+		index += 1
 	}
 
 	for i := 0; i < len(onlineViewParams); i++ {
 		out := <-ch
-		if out != 0 {
-			fmt.Printf("Error\n")
-		} else {
-			fmt.Printf("Success\n")
+		if out.Err != nil {
+			fmt.Printf("#%d: viewWorker => %s | Error: %s\n", out.Index, red("ERROR"), out.Err.Error())
+			continue
 		}
+		fmt.Printf("#%d: viewWorker => %s\n", out.Index, green("END"))
 	}
 
 	return nil
@@ -94,25 +105,31 @@ type viewParams struct {
 	Kj_lect_type   string
 	Item_id        string
 	force          string
+	RemainSec      int
 }
 
-func (a *Account) parseLectureWeeks(kj string) (week_nos []string, err error) {
+type lectureForm struct {
+	WEEK_NO      string
+	KJKEY        string
+	Kj_lect_type string
+	Force        string
+}
+
+func (a *Account) parseLectureWeeks(kj string) (forms []*lectureForm, err error) {
 	a.m.Lock()
+	defer a.m.Unlock()
 	err = a.ChangeRoom(kj)
 	if err != nil {
-		a.m.Unlock()
 		return
 	}
 	req, err := http.NewRequest("GET", "https://eclass.seoultech.ac.kr/ilos/st/course/online_list_form.acl", nil)
 	if err != nil {
-		a.m.Unlock()
 		return
 	}
 	req.AddCookie(&http.Cookie{Name: "LMS_SESSIONID", Value: a.session})
 	client := &http.Client{}
 
 	resp, err := client.Do(req)
-	a.m.Unlock()
 	if err != nil {
 		return
 	}
@@ -123,6 +140,7 @@ func (a *Account) parseLectureWeeks(kj string) (week_nos []string, err error) {
 	}
 
 	raw_wbs := html.Find(".wb")
+	week_nos := []string{}
 	raw_wbs.Each(func(i int, s *goquery.Selection) {
 		week_no, exist := s.Attr("id")
 		if !exist {
@@ -131,12 +149,39 @@ func (a *Account) parseLectureWeeks(kj string) (week_nos []string, err error) {
 		week_no = week_no[5:]
 		week_nos = append(week_nos, week_no)
 	})
+	for _, week_no := range week_nos {
+		req, err = http.NewRequest("GET", fmt.Sprintf("https://eclass.seoultech.ac.kr/ilos/st/course/online_list_form.acl?WEEK_NO=%s", week_no), nil)
+		if err != nil {
+			fmt.Println("week no create request error, but conitnue")
+			continue
+		}
+		req.AddCookie(&http.Cookie{Name: "LMS_SESSIONID", Value: a.session})
+		client = &http.Client{}
+		resp, err = client.Do(req)
+		if err != nil {
+			fmt.Println("week no request error, but conitnue")
+			continue
+		}
+		html, err = goquery.NewDocumentFromReader(resp.Body)
+		if err != nil {
+			fmt.Println("week no doc parse error, but conitnue")
+			continue
+		}
+		kj_lect_type := parseValueByID(html, "kj_lect_type")
+		force := parseValueByID(html, "force")
+		forms = append(forms, &lectureForm{
+			WEEK_NO:      week_no,
+			KJKEY:        kj,
+			Kj_lect_type: kj_lect_type,
+			Force:        force,
+		})
+	}
 	return
 }
 
 func parseValueByID(html *goquery.Document, id string) (result string) {
 	result = ""
-	el := html.Find(id)
+	el := html.Find(fmt.Sprintf("#%s", id))
 	el = el.First()
 	result, exist := el.Attr("value")
 	if !exist {
@@ -145,8 +190,9 @@ func parseValueByID(html *goquery.Document, id string) (result string) {
 	return
 }
 
-func (a *Account) parseOnlineLectures(kj string, week_no string) (params []*viewParams, err error) {
-	req, err := http.NewRequest("POST", fmt.Sprintf("https://eclass.seoultech.ac.kr/ilos/st/course/online_list.acl?ud=%s&ky=%s&WEEK_NO=%s&encoding=utf-8", a.id, kj, week_no), nil)
+func (a *Account) parseOnlineLectures(kj string, lectureForm *lectureForm) (params []*viewParams, err error) {
+
+	req, err := http.NewRequest("POST", fmt.Sprintf("https://eclass.seoultech.ac.kr/ilos/st/course/online_list.acl?ud=%s&ky=%s&WEEK_NO=%s&encoding=utf-8", a.id, kj, lectureForm.WEEK_NO), nil)
 	if err != nil {
 		return
 	}
@@ -162,10 +208,6 @@ func (a *Account) parseOnlineLectures(kj string, week_no string) (params []*view
 	if err != nil {
 		return
 	}
-
-	_KJKEY := parseValueByID(html, "_KJKEY")
-	kj_lect_type := parseValueByID(html, "kj_lect_type")
-	force := parseValueByID(html, "force")
 
 	link_block := html.Find(".site-mouseover-color")
 	link_block.Each(func(i int, s *goquery.Selection) {
@@ -186,14 +228,81 @@ func (a *Account) parseOnlineLectures(kj string, week_no string) (params []*view
 		viewGoParams := &viewParams{
 			Leacture_weeks: seq,
 			WEEK_NO:        week,
-			_KJKEY:         _KJKEY,
-			Kj_lect_type:   kj_lect_type,
+			_KJKEY:         kj,
+			Kj_lect_type:   lectureForm.Kj_lect_type,
 			Item_id:        item,
-			force:          force,
+			force:          lectureForm.Force,
+			RemainSec:      0,
 		}
 		params = append(params, viewGoParams)
+
 	})
+	r, _ := regexp.Compile(`([0-9]+:)?[0-9]+:[0-9]+\s/\s([0-9]+:)?[0-9]+:[0-9]+`)
+	times := r.FindAllString(html.Text(), link_block.Length())
+	for i, time := range times {
+		remainSec, err := calRemainSec(time)
+		if err != nil {
+			remainSec = 0
+		}
+		params[i].RemainSec = remainSec
+	}
 	return
+}
+
+func calRemainSec(s string) (remainSec int, err error) {
+	remainSec = 0
+	tmp := strings.Split(s, " / ")
+	viewTimeString := tmp[0]
+	totalTimeString := tmp[1]
+
+	viewSec, err := parseSec(viewTimeString)
+	if err != nil {
+		return
+	}
+	totalSec, err := parseSec(totalTimeString)
+	if err != nil {
+		return
+	}
+	if viewSec > totalSec {
+		return 0, nil
+	}
+	return totalSec - viewSec, nil
+}
+
+func parseSec(s string) (int, error) {
+	hour := 0
+	min := 0
+	sec := 0
+	tmp := strings.Split(s, ":")
+	if len(tmp) == 2 {
+		t, err := strconv.Atoi(tmp[0])
+		if err != nil {
+			return 0, err
+		}
+		min = t
+		t, err = strconv.Atoi(tmp[1])
+		if err != nil {
+			return 0, err
+		}
+		sec = t
+	} else if len(tmp) == 3 {
+		t, err := strconv.Atoi(tmp[0])
+		if err != nil {
+			return 0, err
+		}
+		hour = t
+		t, err = strconv.Atoi(tmp[1])
+		if err != nil {
+			return 0, err
+		}
+		min = t
+		t, err = strconv.Atoi(tmp[2])
+		if err != nil {
+			return 0, err
+		}
+		sec = t
+	}
+	return 3600*hour + 60*min + sec, nil
 }
 
 type naviParams struct {
@@ -208,6 +317,9 @@ type naviParams struct {
 }
 
 func (a *Account) parseNaviParames(params *viewParams) (output *naviParams, err error) {
+	a.m.Lock()
+	defer a.m.Unlock()
+	a.ChangeRoom(params._KJKEY)
 	req, err := http.NewRequest("POST", fmt.Sprintf("https://eclass.seoultech.ac.kr/ilos/st/course/online_view_form.acl?lecture_weeks=%s&WEEK_NO=%s&_KJKEY=%s&kj_lect_type=%s&item_id=%s&force=%s",
 		params.Leacture_weeks, params.WEEK_NO, params._KJKEY, params.Kj_lect_type, params.Item_id, params.force), nil)
 	if err != nil {

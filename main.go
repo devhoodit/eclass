@@ -7,7 +7,7 @@ import (
 )
 
 func main() {
-	e, err := eclass.New("ID", "PASSWORD")
+	e, err := eclass.New("", "")
 	if err != nil {
 		return
 	}
